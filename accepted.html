@@ -1,32 +1,128 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-KUdLFakdU4aS8rBmAdCGvJK8GvB15R3wdwIipQwO6aM='; style-src 'sha256-J7Fl5RuW+REbUMjbAcuwo4kAlan9cYUjDA9B9kilm5U='; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, noarchive, nosnippet">
+<script>
+(() => {
+  "use strict";
+  // Keep the original bytes for F3; never rebuild the callback with URLSearchParams.
+  let original = window.location.href;
+  let cleaned = false;
+  try {
+    window.history.replaceState(null, "", window.location.pathname);
+    cleaned = !window.location.search && !window.location.hash;
+  } catch (_) { /* Fail closed; never copy an uncleared return. */ }
 
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="referrer" content="no-referrer">
-  <title>VELTRIX — Connexion eBay</title>
-  <style>
-    body {
-      background: #101217;
-      color: #f4f4f5;
-      font-family: Arial, sans-serif;
-      text-align: center;
-      padding: 60px 20px;
+  const page = "accepted";
+  const expectedPath = "/Veltrix-oauth/" + page + ".html";
+  let eligible = false;
+  let denied = false;
+  let busy = false;
+  let closed = false;
+  let timer;
+  let deadline = 0;
+  let message = cleaned
+    ? "Aucun retour OAuth exploitable. Revenez dans VELTRIX ; ne recopiez pas l’adresse nettoyée."
+    : "Nettoyage de l’adresse impossible. Retour désactivé : fermez cet onglet sans partager son adresse.";
+  try {
+    if (!cleaned || original.length > 16384 || /\s/.test(original)) throw new Error();
+    const u = new URL(original);
+    if (u.protocol !== "https:" || u.hostname !== "batenisbad.github.io" ||
+        u.port || u.username || u.password || u.pathname !== expectedPath ||
+        u.hash || original.includes("#")) throw new Error();
+    const allowed = new Set(["code", "state", "error", "error_description", "expires_in"]);
+    const fields = u.search.slice(1).split("&");
+    if (!u.search || fields.length > 20 || fields.some(x => !x || !x.includes("="))) throw new Error();
+    // URLSearchParams is forgiving; reject malformed escapes rather than hide them.
+    for (const field of fields) for (const part of field.split("=")) decodeURIComponent(part.replace(/\+/g, " "));
+    const q = u.searchParams;
+    for (const key of q.keys()) if (!allowed.has(key) || q.getAll(key).length !== 1) throw new Error();
+    const state = q.get("state");
+    if (!state || state.length > 256 || /[^\x20-\x7e]/.test(state)) throw new Error();
+    const hasCode = q.has("code"), hasError = q.has("error");
+    if (hasCode === hasError) throw new Error();
+    if (hasCode && (page !== "accepted" || !q.get("code") || q.get("code").length > 8192)) throw new Error();
+    if (hasError && !q.get("error")) throw new Error();
+    let ttl = 300;
+    if (q.has("expires_in")) {
+      if (!/^[0-9]+$/.test(q.get("expires_in"))) throw new Error();
+      ttl = Math.min(ttl, Number(q.get("expires_in")));
+      if (!Number.isFinite(ttl) || ttl <= 0) throw new Error();
     }
-    main { max-width: 600px; margin: auto; }
-    h1 { color: #81aaff; }
-    p { line-height: 1.6; color: #cbd0dc; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>VELTRIX</h1>
-    <h2>Retour de connexion eBay</h2>
-    <p>Revenez dans VELTRIX pour terminer
-       la connexion de votre compte Sandbox.</p>
-    <p>Ne partagez jamais l'URL de cette page :
-       elle peut contenir un code de connexion temporaire.</p>
-  </main>
-</body>
-</html>
+    deadline = performance.now() + ttl * 1000;
+    denied = hasError;
+    eligible = true;
+    message = denied
+      ? "Consentement refusé. Vous pouvez transmettre ce refus à VELTRIX pour vérifier la session."
+      : "Adresse nettoyée. Le retour est prêt à être copié sur votre demande. VELTRIX vérifiera ensuite la session.";
+  } catch (_) {
+    original = "";
+    if (cleaned && window.location.protocol === "https:") message = "Retour absent, incomplet ou inattendu : copie désactivée. Revenez dans VELTRIX pour reprendre la connexion.";
+  }
+
+  function render() {
+    const status = document.getElementById("status");
+    const button = document.getElementById("copy");
+    if (!status || !button) return;
+    status.textContent = message;
+    button.disabled = !eligible || busy || closed;
+    button.setAttribute("aria-busy", busy ? "true" : "false");
+  }
+  function forget(text) {
+    original = "";
+    eligible = false;
+    closed = true;
+    clearTimeout(timer);
+    message = text;
+    render();
+  }
+  window.addEventListener("pagehide", () => forget("Retour abandonné. Reprenez la connexion dans VELTRIX."));
+  window.addEventListener("pageshow", e => {
+    if (e.persisted) forget("Page restaurée : retour indisponible. Reprenez la connexion dans VELTRIX.");
+  });
+  window.addEventListener("popstate", () => {
+    try { window.history.replaceState(null, "", window.location.pathname); } catch (_) {}
+    forget("Navigation modifiée : retour indisponible. Reprenez la connexion dans VELTRIX.");
+  });
+  if (eligible) timer = setTimeout(() => forget("Délai local écoulé. Reprenez la connexion dans VELTRIX."), Math.max(0, deadline - performance.now()));
+  if (!eligible) original = "";
+  document.addEventListener("DOMContentLoaded", () => {
+    render();
+    document.getElementById("copy").addEventListener("click", async event => {
+      if (!event.isTrusted || !eligible || busy || closed) return;
+      if (performance.now() >= deadline) { forget("Délai local écoulé. Reprenez la connexion dans VELTRIX."); return; }
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        message = "Presse-papiers indisponible. Utilisez un navigateur compatible en HTTPS et reprenez la connexion si nécessaire. Aucun code n’est affiché.";
+        render(); return;
+      }
+      busy = true;
+      message = "Copie en cours…";
+      render();
+      try {
+        await navigator.clipboard.writeText(original);
+        if (closed) return;
+        forget(denied
+          ? "Refus copié. Revenez dans VELTRIX et collez-le dans le champ de retour OAuth."
+          : "Retour copié. Revenez dans VELTRIX, collez-le dans le champ masqué puis validez sans attendre.");
+      } catch (_) {
+        if (closed) return;
+        if (performance.now() >= deadline) { forget("Délai local écoulé. Reprenez la connexion dans VELTRIX."); return; }
+        busy = false;
+        message = "Copie refusée par le navigateur. Autorisez le presse-papiers puis réessayez avant expiration. Aucun code n’est affiché.";
+        render();
+      }
+    });
+  }, { once: true });
+})();
+</script>
+<title>VELTRIX — Retour de connexion eBay</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#080f19;color:#e6edf8;font:17px/1.65 system-ui,sans-serif;min-height:100vh;display:grid;place-items:center;padding:28px}main{width:min(100%,760px);background:#111e2e;border:1px solid #304561;border-radius:20px;padding:clamp(24px,5vw,48px);box-shadow:0 0 45px #439fff14}h1{font-size:20px;letter-spacing:.16em;color:#79aaff}h2{font-size:clamp(26px,4vw,36px);line-height:1.2}h3{color:#79aaff}p,li{color:#b9c9df}strong{color:#e6edf8}.badge{display:inline-block;color:#72d7ba;border:1px solid #327364;border-radius:20px;padding:3px 12px;font-size:14px}button{font:inherit;font-weight:650;border:1px solid #79aaff;background:#439fff;color:#061321;border-radius:9px;padding:14px 20px;cursor:pointer;max-width:100%}button:disabled{background:#25374d;color:#a5b4c8;border-color:#53647d;cursor:default}button:focus-visible,a:focus-visible{outline:3px solid #ffbf57;outline-offset:5px}#status{min-height:5em;border-left:3px solid #72d7ba;padding:12px 16px;background:#080f19;border-radius:4px}a{color:#81b6ff;text-underline-offset:4px}.small{font-size:14px;color:#9dafc7}footer{border-top:1px solid #304561;margin-top:30px;padding-top:16px}code{overflow-wrap:anywhere}ul{padding-left:22px}
+</style></head><body><main><h1>VELTRIX</h1><span class="badge">Préparation Sandbox</span><h2>Retour de connexion eBay</h2>
+<p id="status" role="status" aria-live="polite">Initialisation du retour sécurisé…</p>
+<button id="copy" type="button" disabled>Copier le retour vers VELTRIX</button>
+<p>Revenez dans l’application VELTRIX déjà ouverte avec <strong>Alt + Tab</strong>, puis utilisez son champ masqué de retour OAuth. Aucun lancement automatique de l’application.</p>
+<p class="small">Copiez sans attendre : le délai local est limité à cinq minutes au maximum après l’arrivée, et eBay ou VELTRIX peuvent refuser le retour plus tôt. La copie réussie, l’expiration ou la sortie de cette page rendent le retour indisponible ici. Actualiser ne le récupère pas.</p>
+<noscript><p>JavaScript est désactivé : l’adresse ne peut pas être nettoyée et la copie est indisponible. Fermez cet onglet sans partager son adresse.</p></noscript>
+<footer><p class="small">Ne partagez pas cette URL ni votre presse-papiers. GitHub reçoit la requête initiale ; nettoyer l’adresse n’efface pas ses éventuels journaux. L’historique du presse-papiers peut conserver la copie.</p><a href="privacy.html" rel="noreferrer">Confidentialité</a><p class="small">Ouvrir une autre page abandonne le retour en mémoire.</p></footer></main></body></html>
